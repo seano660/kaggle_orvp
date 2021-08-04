@@ -8,7 +8,7 @@ from metrics import (
     calculate_ba_spread, 
     calculate_ba_vol_spread,
     calculate_class_boundary
-    )
+)
 
 
 def process_book_data(bdata: pd.DataFrame) -> pd.DataFrame:
@@ -98,42 +98,48 @@ def process_trade_data(tdata: pd.DataFrame, bdata: pd.DataFrame) -> pd.DataFrame
 
     return _data
 
-def clean_book_slice(slice: pd.DataFrame) -> pd.DataFrame:
-    """ Clean slice of book data (helper for `lengthen_book_data`) 
+def process_order_data(order_data: pd.DataFrame, order_type: str) -> pd.DataFrame:
+    """ Returns potential events occurring at one level of the order book
     
     Inputs
     ----------
-    slice : pd.DataFrame
+    order_data : pd.DataFrame
         one level of a single stock's book data
+    order_type : str
+        whether the data represents bid or ask prices
 
     Outputs
     ----------
     pd.DataFrame :
-        prcessed trade datao
+        processed trade data
     """
 
-    _slice = slice.copy()
-    s_type = "bid" if "bid" in _slice.columns.values[0] else "ask"
+    _data = order_data.copy()
 
-    # Rename price and size columns to generic
-    _slice.rename(columns = lambda c: re.search("_([a-z]{1,})[0-9]$", c).group(1), inplace = True)
-    _slice["type"] = s_type
-    _slice.set_index(["time_id", "type", "price"], inplace = True)
-    _slice = _slice.reindex(pd.MultiIndex.from_product(
-            [
-                _slice.index.get_level_values(0).unique(),
-                _slice.index.get_level_values(1).unique(),
-                range(1, 600)
-            ]
-        )
-    )
-    _slice.fillna(0, inplace = True)
+    _data.rename(columns = lambda c: re.search("_([a-z]{1,})[0-9]$", c).group(1), inplace = True)
+    _data.set_index("price", append = True, inplace = True)
+    _data = _data.reorder_levels(["time_id", "price", "seconds_in_bucket"])
 
-    return _slice
+    _data = _data.unstack([0, 1])
+    _data = _data.sub(_data.shift(1, freq = "s"), fill_value = 0)
+    _data = _data.T.stack().to_frame()
+    _data.reset_index(level = 0, drop = True, inplace = True)
+    _data.columns = ["size"]
+
+    _data = _data[
+        (_data["size"] != 0) &
+        (_data.index.get_level_values(2) != pd.Timedelta(0, freq = "s"))
+    ]
+
+    _data["order_type"] = order_type
+    _data.set_index("order_type", append = True, inplace = True)
 
 
-def lengthen_book_data(bdata: pd.DataFrame) -> pd.DataFrame:
-    """ Convert wide-form representation of book data to long-form
+    return _data
+
+
+def compile_event_data(bdata: pd.DataFrame) -> pd.DataFrame:
+    """ Gets all possible book events from given data
 
     Inputs
     ----------
@@ -145,19 +151,20 @@ def lengthen_book_data(bdata: pd.DataFrame) -> pd.DataFrame:
     pd.DataFrame :
         single stock's book data in long form
     """ 
-
-    b1 = bdata[["bid_price1", "bid_size1"]]
-    b2 = bdata[["bid_price2", "bid_size2"]]
-    a1 = bdata[["ask_price1", "ask_size1"]]
-    a2 = bdata[["ask_price2", "ask_size2"]]
-
-    _data = pd.concat([clean_book_slice(s) for s in [b1, b2, a1, a2]], axis = 0)
-    _data = _data[["type", "price", "size"]]
+    
+    levels = [
+        (bdata[["bid_price1", "bid_size1"]], "bid"), 
+        (bdata[["bid_price2", "bid_size2"]], "bid"),
+        (bdata[["ask_price1", "ask_size1"]], "ask"),
+        (bdata[["ask_price2", "ask_size2"]], "ask")
+    ]
+    
+    _data = pd.concat([process_order_data(o_data, o_type) for (o_data, o_type) in levels], axis = 0)
 
     return _data
 
 
-def create_event_history(tdata: pd.DataFrame, bdata: pd.DataFrame) -> pd.DataFrame:
+def construct_event_history(tdata: pd.DataFrame, bdata: pd.DataFrame) -> pd.DataFrame:
     """ Creates full trade event history from processed trade and book data
 
     Event definitions: 
@@ -181,49 +188,83 @@ def create_event_history(tdata: pd.DataFrame, bdata: pd.DataFrame) -> pd.DataFra
         event stream in form (time_id, time, event, size)
     """
 
-    # Note: given just two levels of book data, it is not possible to entirely piece together all events. 
-    # The approach taken below is somewhat conservative, but preserves true event integrity as much as possible.
 
-    _bdata = lengthen_book_data(bdata)
-
-    pad = (
-        _bdata.reindex(
-            _bdata.index.set_levels(_bdata.index.levels[3] + 1, level = 3).union(
-                _bdata.index.set_levels(_bdata.index.levels[3] - 1, level = 3)
-            )
-            .unique()
-            .difference(_bdata.index)
-        )
-        .fillna(0)
-    )
-
-    pad = pad[
-        (pad.index.get_level_values(3) >= 0) & 
-        (pad.index.get_level_values(3) <= 599)
-    ]
-
-    changes = pd.concat([_bdata, pad], axis = 0).sort_index().diff().dropna()
-
-    changes = changes[changes != 0].dropna().merge(
-        bdata[["ask_price2", "bid_price2"]], 
+    edata = compile_event_data(bdata)
+    
+    edata = edata.merge(
+        right = bdata[["bid_price2", "ask_price2"]], 
         right_index = True, 
         left_on = ["time_id", "seconds_in_bucket"]
     )
 
-    changes = changes[
-        (
-            (changes.index.get_level_values(1) == "bid") & 
-            (changes.index.get_level_values(2) >= changes["bid_price2"])
-        ) |
-        (
-            (changes.index.get_level_values(1) == "ask") & 
-            (changes.index.get_level_values(2) >= changes["ask_price2"])
-        )
-    ]
+    lag_1 = bdata.reset_index()
+    lag_1["seconds_in_bucket"] = lag_1["seconds_in_bucket"] + pd.Timedelta(1, unit = "s")
+    lag_1.set_index(["time_id", "seconds_in_bucket"], inplace = True, drop = True)
+
+    edata = edata.merge(
+        right = lag_1[["bid_price2", "ask_price2"]], 
+        right_index = True, left_on = ["time_id", "seconds_in_bucket"], 
+        how = "left", 
+        suffixes = ["_0", "_-1"]
+    )
+    ### 
+    # Match events to each order
+  
+    # Note: given just two levels of book data, it is not possible to entirely piece together all events. 
+    # The approach taken below is somewhat conservative, but preserves true event integrity as much as possible.
+    ###
+
+    edata["event_type"] = None
+
+    # These are cancel-buy orders, i.e. size change is negative. 
+    # Price must be at least the 2nd most competitive bid of the current timestamp,
+    # because otherwise the order could have fallen off the book without being cancelled
+    edata.loc[
+        (edata.index.get_level_values(3) == "bid") & 
+        (edata["size"] < 0) & 
+        (edata.index.get_level_values(1) >= edata["bid_price2_0"]),
+        "event_type"
+    ] = "cancel-buy"
+
+    # These are limit-buy orders, i.e. size change is positive. 
+    # Price must be at least the 2nd most competitive bid of the previous timestamp,
+    # since otherwise order could have entered the book simply by more competitive bids falling off
+    edata.loc[
+        (edata.index.get_level_values(3) == "bid") & 
+        (edata["size"] > 0) & 
+        (edata.index.get_level_values(1) >= edata["bid_price2_-1"]),
+        "event_type"
+    ] = "limit-buy"
+
+    # These are cancel-sell orders, i.e. size change is negative.
+    # Price must be at least the 2nd most competitive ask of the current timestamp, 
+    # because otherwise the order could have fallen off the book without being cancelled
+    edata.loc[
+        (edata.index.get_level_values(3) == "ask") &
+        (edata["size"] < 0) & 
+        (edata.index.get_level_values(1) <= edata["ask_price2_0"]),
+        "event_type"
+    ] = "cancel-sell"
+
+    # These are limit-sell orders, i.e. size change is positive
+    # Price must be at least the 2nd most competitive ask of the previous timestamp,
+    # since otherwise order could have entered the book simply by more competitive asks falling off
+    edata.loc[
+        (edata.index.get_level_values(3) == "ask") &
+        (edata["size"] > 0) & 
+        (edata.index.get_level_values(1) <= edata["ask_price2_-1"]),
+        "event_type"
+    ] = "limit-sell"
+
+    # Remove any row that didn't qualify as an event
+    edata = edata.dropna(subset = ["event_type"])[["event_type", "size"]]
+
+    # Cross-reference events with trade data (to avoid double counting)
+    edata = edata.merge(
+        right = tdata,
+        right_index = True,
+        left_on = ["time_id", "seconds_in_bucket"],
+        how = "left"
+    )
 
     
-
-
-
-
-
