@@ -1,4 +1,6 @@
-data/
+# Custom ignore list
+data/files/*
+notebooks/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
