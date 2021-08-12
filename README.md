@@ -1,4 +1,4 @@
-<b>kaggle_ovrp</b>
+<b>kaggle_orvp</b>
 
 A simulation-based approach to predicting stock volatility by treating price movements as a system of competing queues. Still a work in progress!
 

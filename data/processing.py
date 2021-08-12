@@ -281,7 +281,7 @@ def construct_event_history(book_data: pd.DataFrame, trade_events: pd.DataFrame)
 
     # Remove any row that didn't qualify as an event
     book_events = book_events.dropna(subset = ["event_type"])[["event_type", "size"]]
-    book_events.reset_index(level = 2, drop = True, inplace = True)
+    book_events.reset_index(level = 3, drop = True, inplace = True)
     book_events.set_index("event_type", append = True, inplace = True)
     book_events = book_events.reorder_levels(["time_id", "seconds_in_bucket", "event_type", "price"])
 
