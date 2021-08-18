@@ -9,9 +9,10 @@ from calcs.metrics import (
     calculate_ba_vol_spread,
     calculate_class_boundary
 )
+from typing import List
 
 
-def process_book_data(bdata: pd.DataFrame) -> pd.DataFrame:
+def process_book_data(book_data: pd.DataFrame) -> pd.DataFrame:
     """ 
     Convert given book data to true second-by-second feed & add relevant features 
 
@@ -26,33 +27,33 @@ def process_book_data(bdata: pd.DataFrame) -> pd.DataFrame:
         processed book data
     """
 
-    _data = bdata.copy()
+    data = book_data.copy()
     
     # Save memory by downcasting numeric data types
     int_cols = ["time_id", "bid_size1", "bid_size2", "ask_size1", "ask_size2"]
     float_cols = ["bid_price1", "bid_price2", "ask_price1", "ask_price2"]
     
     # _data[cat_cols] = _data[cat_cols].astype("category")
-    _data[int_cols] = _data[int_cols].apply(pd.to_numeric, downcast = "unsigned")
-    _data[float_cols] =_data[float_cols].apply(pd.to_numeric, downcast = "float")
+    data[int_cols] = data[int_cols].apply(pd.to_numeric, downcast = "unsigned")
+    data[float_cols] =data[float_cols].apply(pd.to_numeric, downcast = "float")
     
     # Account for filler data not starting at 0s
-    _data.set_index(["time_id"], drop = True, inplace = True)
-    _data["seconds_in_bucket"] = _data["seconds_in_bucket"].sub(_data.groupby(level = 0)["seconds_in_bucket"].min(), level = 0)
-    _data.reset_index(inplace = True)
+    data.set_index(["time_id"], drop = True, inplace = True)
+    data["seconds_in_bucket"] = data["seconds_in_bucket"].sub(data.groupby(level = 0)["seconds_in_bucket"].min(), level = 0)
+    data.reset_index(inplace = True)
 
     # Forward fill missing book snapshots
     # The performance here could possibly be improved but works for now
-    _data.set_index(["time_id", "seconds_in_bucket"], drop = True, inplace = True)
-    _data = _data.reindex(
+    data.set_index(["time_id", "seconds_in_bucket"], drop = True, inplace = True)
+    data = data.reindex(
         labels = pd.MultiIndex.from_product(
-            [_data.index.get_level_values(0).unique(), range(0, 600)],
+            [data.index.get_level_values(0).unique(), range(0, 600)],
             names = ["time_id", "seconds_in_bucket"]), 
         method = "ffill"
     )
 
-    _data.index = _data.index.set_levels(
-        pd.to_timedelta(_data.index.get_level_values(1).unique(), unit = "s"),
+    data.index = data.index.set_levels(
+        pd.to_timedelta(data.index.get_level_values(1).unique(), unit = "s"),
         level = 1
     )
     # Compute additional features
@@ -60,7 +61,7 @@ def process_book_data(bdata: pd.DataFrame) -> pd.DataFrame:
 #     _data["ba_spread"] = calculate_ba_spread(_data)
 #     _data["ba_vol_spread"] = calculate_ba_vol_spread(_data)
 
-    return _data
+    return data
 
 
 def process_trade_data(trade_data: pd.DataFrame, book_data: pd.DataFrame) -> pd.DataFrame:
@@ -87,7 +88,7 @@ def process_trade_data(trade_data: pd.DataFrame, book_data: pd.DataFrame) -> pd.
     # Join trade data to 1-second lag of book data (all reported trades occur in the second prior)
     # We seem to get faster join speed converting `seconds_in_bucket` from timedelta to int
     book_lag = book_data.reset_index()
-    book_lag["seconds_in_bucket"] = book_lag["seconds_in_bucket"].dt.seconds - 1
+    book_lag["seconds_in_bucket"] = book_lag["seconds_in_bucket"].dt.seconds + 1
     book_lag.set_index(["time_id", "seconds_in_bucket"], inplace = True)
 
     events = events.merge(
@@ -98,12 +99,6 @@ def process_trade_data(trade_data: pd.DataFrame, book_data: pd.DataFrame) -> pd.
     )
 
     # Classify trades as market buy if trade is GTE the bid-ask midpoint; otherwise classify as market sell
-    events["bid_ask_mid"] = (events["bid_price1"] + events["ask_price1"]) / 2
-    events["event_type"] = None
-    
-    events.loc[events["price"] >= events["bid_ask_mid"], "event_type"] = "market-buy"
-    events.loc[events["price"] < events["bid_ask_mid"], "event_type"] = "market-sell"
-
 
     # Note: this is a somewhat naive approach - trades are reported in aggregate, and it is possible
     # that both buy and sell orders occurred during the time interval. 
@@ -113,6 +108,12 @@ def process_trade_data(trade_data: pd.DataFrame, book_data: pd.DataFrame) -> pd.
     # TODO: Investigate the importance of this over a larger sample of stocks/times, and implement an 
     # algorithm to derive the most likely composition of the trade 
 
+    events["bid_ask_mid"] = (events["bid_price1"] + events["ask_price1"]) / 2
+    events["event_type"] = None
+    
+    events.loc[events["price"] >= events["bid_ask_mid"], "event_type"] = "market-buy"
+    events.loc[events["price"] < events["bid_ask_mid"], "event_type"] = "market-sell"
+
     events["seconds_in_bucket"] = pd.to_timedelta(events["seconds_in_bucket"], unit = "sec")
 
     events.set_index(["time_id", "seconds_in_bucket", "event_type", "price"], inplace = True)
@@ -120,13 +121,13 @@ def process_trade_data(trade_data: pd.DataFrame, book_data: pd.DataFrame) -> pd.
     return events[["size"]]
 
 
-def process_order_data(order_data: pd.DataFrame, order_type: str) -> pd.DataFrame:
+def process_order_data(order_data: List[pd.DataFrame], order_type: str) -> pd.DataFrame:
     """ Returns potential events occurring at one level of the order book
     
     Inputs
     ----------
-    order_data : pd.DataFrame
-        one level of a single stock's book data
+    order_data : List[pd.DataFrame]
+        one side of the order book 
     order_type : str
         whether the data represents bid or ask prices
 
@@ -136,11 +137,15 @@ def process_order_data(order_data: pd.DataFrame, order_type: str) -> pd.DataFram
         processed trade data
     """
 
-    events = order_data.copy()
+    processed_data = []
 
-    events.rename(columns = lambda c: re.search("_([a-z]{1,})[0-9]$", c).group(1), inplace = True)
-    events.set_index("price", append = True, inplace = True)
-    events = events.reorder_levels(["time_id", "price", "seconds_in_bucket"])
+    for level in order_data:
+        _level = level.rename(columns = lambda c: re.search("_([a-z]{1,})[0-9]$", c).group(1))
+        _level.set_index("price", append = True, inplace = True)
+        _level = _level.reorder_levels(["time_id", "price", "seconds_in_bucket"])
+        processed_data.append(_level)
+
+    events = pd.concat(processed_data)
 
     events = events.unstack([0, 1])
     events = events.sub(events.shift(1, freq = "s"), fill_value = 0)
@@ -175,13 +180,17 @@ def compile_event_data(book_data: pd.DataFrame) -> pd.DataFrame:
     """ 
     
     levels = [
-        (book_data[["bid_price1", "bid_size1"]], "bid"), 
-        (book_data[["bid_price2", "bid_size2"]], "bid"),
-        (book_data[["ask_price1", "ask_size1"]], "ask"),
-        (book_data[["ask_price2", "ask_size2"]], "ask")
+        [
+            book_data[["bid_price1", "bid_size1"]],
+            book_data[["bid_price2", "bid_size2"]]
+        ],
+        [
+            book_data[["ask_price1", "ask_size1"]],
+            book_data[["ask_price2", "ask_size2"]]
+        ]
     ]
     
-    events = pd.concat([process_order_data(o_data, o_type) for (o_data, o_type) in levels], axis = 0)
+    events = pd.concat([process_order_data(o_data, o_type) for o_data, o_type in zip(levels, ["bid", "ask"])], axis = 0)
 
     return events
 
@@ -216,7 +225,8 @@ def construct_event_history(book_data: pd.DataFrame, trade_events: pd.DataFrame)
     book_events = book_events.merge(
         right = book_data[["bid_price2", "ask_price2"]], 
         right_index = True, 
-        left_on = ["time_id", "seconds_in_bucket"]
+        left_on = ["time_id", "seconds_in_bucket"],
+        how = "left"
     )
 
     # Join events to 1-second lag of book data
@@ -225,11 +235,15 @@ def construct_event_history(book_data: pd.DataFrame, trade_events: pd.DataFrame)
     lag_1.set_index(["time_id", "seconds_in_bucket"], inplace = True, drop = True)
 
     book_events = book_events.merge(
-        right = lag_1[["bid_price2", "ask_price2"]], 
-        right_index = True, left_on = ["time_id", "seconds_in_bucket"], 
+        right = lag_1[["bid_price1", "ask_price1", "bid_price2", "ask_price2"]], 
+        right_index = True, 
+        left_on = ["time_id", "seconds_in_bucket"], 
         how = "left", 
         suffixes = ["_0", "_-1"]
     )
+    
+    book_events.rename(columns = {"bid_price1": "bid_price1_-1", "ask_price1": "ask_price1_-1"}, inplace = True)
+
     ### 
     # Match events to each order
   
@@ -279,6 +293,21 @@ def construct_event_history(book_data: pd.DataFrame, trade_events: pd.DataFrame)
         "event_type"
     ] = "limit-sell"
 
+    # Remove any event not stemming from the most competitive price level
+    # The logic here is complex - for size < 0 the reference 
+    book_events = book_events[
+        (
+            (book_events.index.get_level_values(3) == "ask") & 
+            (book_events["event_type"].isin(["cancel-sell", "limit-sell"])) &
+            (book_events.index.get_level_values(1) == book_events["ask_price1_-1"])
+        ) | 
+        (
+            (book_events.index.get_level_values(3) == "bid") & 
+            (book_events["event_type"].isin(["cancel-buy", "limit-buy"])) &
+            (book_events.index.get_level_values(1) == book_events["bid_price1_-1"])
+        )
+    ]
+
     # Remove any row that didn't qualify as an event
     book_events = book_events.dropna(subset = ["event_type"])[["event_type", "size"]]
     book_events.reset_index(level = 3, drop = True, inplace = True)
@@ -287,8 +316,18 @@ def construct_event_history(book_data: pd.DataFrame, trade_events: pd.DataFrame)
 
     events = pd.concat([book_events, trade_events], axis = 0)
     events.sort_index(inplace = True)
+    events["size"] = events["size"].abs()
 
-    # Cross-reference events with trade data (to avoid double counting)
+    # Cross-reference book events with trade data: 
+    # Because the book events are initially determined independently of the trade data,
+    # actual trades may have been reported as cancel events. I.E.,
+    # Remove any cancel-buy events where there is a market-sell in the same time_id & seconds_in_bucket
+    # Remove any cancel-sell events where there is a market-buy in the same time_id & seconds_in_bucket
+
+    events = events.reset_index(level = 3, drop = True).unstack(level = 2)
+    events[("size", "cancel-buy")] = events[("size", "cancel-buy")].mask(~events[("size", "market-sell")].isna())
+    events[("size", "cancel-sell")] = events[("size", "cancel-buy")].mask(~events[("size", "market-buy")].isna())
+    events = events.stack()
 
     return events
 
