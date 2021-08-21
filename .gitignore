@@ -1,6 +1,7 @@
 # Custom ignore list
 data/files/*
 notebooks/
+*.obj
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

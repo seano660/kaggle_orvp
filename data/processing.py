@@ -324,9 +324,14 @@ def construct_event_history(book_data: pd.DataFrame, trade_events: pd.DataFrame)
     # Remove any cancel-buy events where there is a market-sell in the same time_id & seconds_in_bucket
     # Remove any cancel-sell events where there is a market-buy in the same time_id & seconds_in_bucket
 
-    events = events.reset_index(level = 3, drop = True).unstack(level = 2)
+    events = (
+        events.reset_index(level = 3, drop = True)
+        .unstack(level = 2)
+        # Ensure that all events are represented regardless of whether they appear - this is necessary for filtering step
+        .reindex(["limit-sell", "limit-buy", "market-sell", "market-buy", "cancel-sell", "cancel-buy"], level = 1, axis = 1)
+    )
     events[("size", "cancel-buy")] = events[("size", "cancel-buy")].mask(~events[("size", "market-sell")].isna())
-    events[("size", "cancel-sell")] = events[("size", "cancel-buy")].mask(~events[("size", "market-buy")].isna())
+    events[("size", "cancel-sell")] = events[("size", "cancel-sell")].mask(~events[("size", "market-buy")].isna())
     events = events.stack()
 
     return events

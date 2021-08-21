@@ -11,21 +11,22 @@ def calculate_realized_volatility(data: pd.Series) -> pd.Series:
         sum(
             np.power(
                 np.log(data)
-                .diff(), 
+                .diff()
+                .dropna(),
             2)
         )
     )
 
 
 def calculate_wap(data: pd.DataFrame) -> pd.Series:
-    """ Calculate the second-by-second WAP given book data """
+    """ Calculate the second-by-second WAP of simulated data """
     
     return (
         (
-            (data["bid_price1"] * data["ask_size1"]) + 
-            (data["ask_price1"] * data["bid_size1"])
+            (data["bid_price"] * data["ask_size"]) + 
+            (data["ask_price"] * data["bid_size"])
         ) / 
-        (data["bid_size1"] + data["ask_size1"])
+        (data["bid_size"] + data["ask_size"])
     )
 
 
@@ -71,8 +72,8 @@ def calculate_rmspe(data: pd.DataFrame) -> float:
             sum(
                 np.power(
                     (
-                        (data["pred"] - data["actual"]) 
-                        / data["actual"]),
+                        (data["pred"] - data["target"]) 
+                        / data["target"]),
                     2
                 )
             )
