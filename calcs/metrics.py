@@ -4,14 +4,26 @@ import pandas as pd
 import numpy as np
 from math import ceil
 
-def calculate_realized_volatility(data: pd.Series) -> pd.Series:
-    """ Calculate the realized volatility over a 10-minute period given WAP """
+def calculate_realized_volatility(data: pd.Series) -> float:
+    """ Calculate the realized volatility over a 10-minute period given WAP 
+    
+    Inputs
+    ----------
+    data : pd.Series
+        weighted average prices over which to compute realized volatility
+    
+    Outputs
+    ----------
+    float :
+        realized volatility
+    """
 
     return np.sqrt(
         sum(
             np.power(
                 np.log(data)
                 .diff()
+                # Dropna is necessary because the first .diff() will always be NA
                 .dropna(),
             2)
         )
@@ -19,7 +31,7 @@ def calculate_realized_volatility(data: pd.Series) -> pd.Series:
 
 
 def calculate_wap(data: pd.DataFrame) -> pd.Series:
-    """ Calculate the second-by-second WAP of simulated data """
+    """ Calculate the WAP of simulated data """
     
     return (
         (

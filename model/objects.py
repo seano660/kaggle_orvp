@@ -1,6 +1,5 @@
 """ Contains object definitions for use in simulation model """
 
-import pandas as pd
 import simpy
 import random
 from typing import Union, Optional
@@ -18,10 +17,20 @@ class LimitOrderBook():
         """ 
         Class to represent the limit order book
 
-        (LOB1.0) Note: Since we are modeling only one level of the order book, the elements are homogenous
-        (i.e. all order prices are the same); therefore we can model this dynamic with a simple 
-        `simpy.Container` in place of a `simpy.Resource`. This is a limiting assumption of the model and 
-        this code will need to be revisited if multiple order levels are to be represented. 
+        Parameters
+        ----------
+        env : simpy.Environment
+            the simulation environment
+        bid_price : float
+            the best bid price of the order book
+        bid_size : int
+            the best bid size of the order book
+        ask_price : float
+            the best ask price of the order book
+        ask_size : int
+            the best ask size of the order book
+        params : dict
+            model params that inform how the order book transitions following depletion of a price level
         """
 
         self.env = env
@@ -35,8 +44,11 @@ class LimitOrderBook():
         self.event_history = []
 
 
-    def shift_order_book(self, shift_dir: int):
-        """ Defines how the book shifts when an order level is depleted """
+    def _shift_order_book(self, shift_dir: int):
+        """ Defines how the book shifts when an order level is depleted 
+        
+        Shift is upward if shift_dir > 0; otherwise shift is downward
+        """
 
         if shift_dir > 0:
             self.ask_price = self.ask_price + self.params["avg_level_dist"]
@@ -45,8 +57,8 @@ class LimitOrderBook():
             self.bid_price = self.bid_price - self.params["avg_level_dist"]
             self.ask_price = self.bid_price + self.params["avg_spread"]
 
-        self.bid_queue = self.params["avg_bid_size"]
-        self.ask_queue = self.params["avg_ask_size"]
+        self.bid_size = self.params["avg_bid_size"]
+        self.ask_size = self.params["avg_ask_size"]
 
 
     def modify_ask_queue(self, size: int):
@@ -54,7 +66,7 @@ class LimitOrderBook():
             self.ask_size = self.ask_size + size
         else:
             size = size + self.ask_size
-            self.shift_order_book(shift_dir = 1)
+            self._shift_order_book(shift_dir = 1)
             
             if size != 0:
                 self.modify_ask_queue(size)
@@ -72,6 +84,15 @@ class LimitOrderBook():
 
 
     def process_event(self, event_type: str, event_size: int):
+        """ Handles how various event types impact the order book
+            
+        Inputs
+        ----------
+        event_type: str
+            the type of the event
+        event_size: int
+            the size of the event
+        """
         if event_type in ["market-buy", "cancel-sell"]:
             # These orders reduce the size of the ask (i.e. sell) queue 
             self.modify_ask_queue(-event_size)
@@ -87,12 +108,11 @@ class LimitOrderBook():
         else:
             raise ValueError("Event {} is not recognized as a proper event type.".format(event_type))
 
-        self.update_event_history(event_type, event_size)
+        # This event history is nice to have but not really needed - disabled to improve runtime
+        # self.update_event_history(event_type, event_size)
 
     def update_history(self):
-        """
-        Summarizes the state of the order book when called, and appends to the historical record
-        """
+        """ Accounts the state of the order book when called """
 
         self.history.append(
             {
@@ -117,8 +137,8 @@ class LimitOrderBook():
     def monitor_history(self):
         """ Generator process to update the price history every second
         
-        Note: as opposed to updating the history after every event, the history is updated in 1-second
-        intervals to maintain consistency with the competition data
+        Note: as opposed to updating the history after every event/change to the order book,
+         the history is updated in 1-second intervals to maintain consistency with the competition data
         """
 
         while True:

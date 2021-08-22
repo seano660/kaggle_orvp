@@ -3,12 +3,6 @@
 import pandas as pd
 import numpy as np
 import re
-from calcs.metrics import (
-    calculate_wap, 
-    calculate_ba_spread, 
-    calculate_ba_vol_spread,
-    calculate_class_boundary
-)
 from typing import List
 
 
@@ -49,6 +43,8 @@ def process_book_data(book_data: pd.DataFrame) -> pd.DataFrame:
         labels = pd.MultiIndex.from_product(
             [data.index.get_level_values(0).unique(), range(0, 600)],
             names = ["time_id", "seconds_in_bucket"]), 
+        # The only situation this fill logic will fail is if there is a time_id with some N/A values
+        # at the first entry; these rows will be forward filled from the previous timestamp!
         method = "ffill"
     )
 
@@ -103,10 +99,7 @@ def process_trade_data(trade_data: pd.DataFrame, book_data: pd.DataFrame) -> pd.
     # Note: this is a somewhat naive approach - trades are reported in aggregate, and it is possible
     # that both buy and sell orders occurred during the time interval. 
     # However, in the large majority of examined cases, aggregate prices border the prevailing bid/ask
-    # price, suggesting this is a minor issue. 
-
-    # TODO: Investigate the importance of this over a larger sample of stocks/times, and implement an 
-    # algorithm to derive the most likely composition of the trade 
+    # price, suggesting this is a minor oversight. 
 
     events["bid_ask_mid"] = (events["bid_price1"] + events["ask_price1"]) / 2
     events["event_type"] = None
@@ -122,7 +115,7 @@ def process_trade_data(trade_data: pd.DataFrame, book_data: pd.DataFrame) -> pd.
 
 
 def process_order_data(order_data: List[pd.DataFrame], order_type: str) -> pd.DataFrame:
-    """ Returns potential events occurring at one level of the order book
+    """ Returns potential events occurring at one side of the order book
     
     Inputs
     ----------
