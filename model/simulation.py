@@ -2,17 +2,21 @@
 
 import pandas as pd
 import numpy as np
-import simpy
-from simpy.util import start_delayed
 from typing import Optional, Union
+from joblib import Parallel, delayed, wrap_non_picklable_objects
+from joblib.externals.loky import set_loky_pickler
+from bayes_opt import BayesianOptimization
 
 from calcs.metrics import (
     calculate_wap,
-    calculate_realized_volatility
+    calculate_realized_volatility,
+    calculate_rmspe
 )
-from model.objects import LimitOrderBook, EventGenerator
+from calcs.utils import blend_dict
+from model.objects import LimitOrderBook, EventGenerator, SimEnvironment
 from calcs.utils import winsorize
 
+set_loky_pickler("pickle")
 
 class LOBSimulation:
     def __init__(self):
@@ -20,11 +24,10 @@ class LOBSimulation:
         self.global_params = None
         self.local_params = None
         self.last_snapshot = None
+        self.alpha = None
 
     def fit(self, book_data: pd.DataFrame, event_data: pd.DataFrame):
-        """ Construct model parameters from given data
-
-        """
+        """Construct model parameters from given data"""
         
         # Calculate average order size of each event (informs simulated event size)
         # Must be rounded to nearest int - order sizes are whole numbers
@@ -100,6 +103,8 @@ class LOBSimulation:
 
 
         local_event_params = pd.concat([event_size, event_interarrival], axis = 1)
+
+        # Global parameters are the macro-averaged local parameters
         global_event_params = (
             local_event_params.mean(axis = 0)
             .to_frame()
@@ -151,6 +156,8 @@ class LOBSimulation:
             .to_dict(orient = "index")
         )
 
+    @delayed
+    @wrap_non_picklable_objects
     def _run_trial(
         self, 
         init_queue: dict,
@@ -161,7 +168,8 @@ class LOBSimulation:
     ) -> pd.DataFrame:
         """ Run a single simulation for the given length (seconds) """
 
-        env = simpy.Environment(initial_time = -init_delay)
+        # env = simpy.Environment(initial_time = -init_delay)
+        env = SimEnvironment(init_time = init_delay)
         lob = LimitOrderBook(
             env = env,
             params = params["lob_params"],
@@ -170,11 +178,11 @@ class LOBSimulation:
 
         for event_type, event_params in params["event_params"].items():
             gen = EventGenerator(env, lob, event_type, event_params, random_seed)
-            env.process(gen.generate_events())
+            env.schedule(gen.generate_events())
         
-        start_delayed(env, lob.monitor_history(), delay = init_delay)
+        env.schedule(lob.monitor_history(), delay = init_delay)
 
-        env.run(until = length)
+        env.execute(until = length)
 
         return pd.DataFrame(lob.history)
 
@@ -189,11 +197,12 @@ class LOBSimulation:
     ) -> pd.DataFrame:
         """ Simulate the limit order book for the given amount of trials """
 
-        if time_id in self.local_params.keys():
-            params = self.local_params[time_id]
-        else:
-            print("time_id {} not recognized; defaulting to global model.")
-            alpha = 1
+        if time_id not in self.local_params.keys():
+            print("time_id {} not found in local params; defaulting to global model.")
+            alpha = 0
+        
+        params = self._blend_params(time_id, alpha)
+
 
         if use_last_snapshot and time_id in self.last_snapshot.keys():
             init_queue = self.last_snapshot[time_id]
@@ -213,28 +222,51 @@ class LOBSimulation:
                 "ask_price": bid_price + self.global_params["lob_params"]["avg_spread"]
             }
             init_delay = 0
+            
+        # Multiprocessing improves performance for n_trials >> 1
+        with Parallel(n_jobs = -1) as parallel:
+            result = parallel(self._run_trial(init_queue, params, length, init_delay, random_seed) for i in range(n_trials))
 
-        trials = []
-
-        for i in range(n_trials):
-            result = self._run_trial(
-                init_queue = init_queue, 
-                init_delay = init_delay,
-                params = params, 
-                length = length, 
-                random_seed = random_seed
-            )
-            result["trial_id"] = i
-            trials.append(result)
-
-        sim_data = pd.concat(trials)
+        sim_data = pd.concat({n: t for n, t in enumerate(result)}, names = ["trial_id", None])
         sim_data["wap"] = calculate_wap(sim_data)
-
-        sim_data.set_index(["trial_id", "time"], inplace = True, drop = True)
+        sim_data.index = sim_data.index.droplevel(1)
+        sim_data.set_index("time", append = True, inplace = True)
 
         # Prediction is the mean realized volatility of all simulated outcomes
         pred = sim_data.groupby(level = 0)["wap"].apply(lambda x: calculate_realized_volatility(x)).mean()
 
         return pred
 
+    def fit_hyperparameters(self, target: pd.DataFrame, n_iter: int = 10):
+        """Perform Bayesian optimization to determine optimal model hyperparameters"""
+        
+        def model_error(alpha: Union[int, float]):
+            _target = target.copy()
+
+            _target["pred"] = [
+                self.predict_realized_vol(
+                    time_id = time_id, 
+                    n_trials = 1, 
+                    alpha = alpha, 
+                    random_seed = 0
+                )
+                for time_id in target.index.levels[1]
+            ]
+           
+            # Has to return negative error since the Bayes Opt algorithm seeks to maximize this function
+            return -calculate_rmspe(_target)
+
+        optimizer = BayesianOptimization(f = model_error, pbounds = {"alpha": (0, 1)}, random_state = 0)
+
+        optimizer.maximize(init_points = 3, n_iter = n_iter)
+
+        self.alpha = optimizer.max["params"]["alpha"]
+
+    def _blend_params(self, time_id: int, alpha: Union[int, float]):
+        """Blends the global and local parameters of the given time_id"""
+
+        if alpha > 0:
+            return blend_dict(self.local_params[time_id], self.global_params, alpha)
+        else:
+            return self.global_params
 

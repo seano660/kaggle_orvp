@@ -3,7 +3,7 @@ import numpy as np
 from typing import Union
 
 def winsorize(data: pd.Series, lower: Union[int, float] = 0, upper: Union[int, float] = 1) -> pd.Series:
-    """ Util function to winsorize a Pandas series to the given lower and upper quantiles 
+    """Util function to winsorize a Pandas series to the given lower and upper quantiles 
     
     Inputs
     ----------
@@ -27,7 +27,7 @@ def winsorize(data: pd.Series, lower: Union[int, float] = 0, upper: Union[int, f
 
 
 def rmspe_loss(theta: np.ndarray, X: np.ndarray, y: np.ndarray) -> float:
-    """ Loss function for fitting bias term to model 
+    """Loss function for fitting bias term to model 
     
     Inputs
     ----------
@@ -57,3 +57,14 @@ def rmspe_loss(theta: np.ndarray, X: np.ndarray, y: np.ndarray) -> float:
             / y.shape[0]
         )
     )
+
+def blend_dict(d1: dict, d2: dict, alpha: Union[int, float]):
+    """Blend two dictionaries with blending parameter alpha. Assumes both dictionaries have same structure"""
+    blended = {}
+    for k, v in d1.items():
+        if isinstance(v, dict):
+            blended[k] = blend_dict(v, d2[k], alpha)
+        else:
+            blended[k] = v * alpha + d2[k] * (1 - alpha)
+    
+    return blended

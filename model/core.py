@@ -50,6 +50,7 @@ class LOBModel():
         event_data = construct_event_history(book_data, trade_data)
 
         self.lob.fit(book_data, event_data)
+        self.lob.fit_hyperparameters(target_data)
 
         sim_preds = []
 
@@ -74,6 +75,8 @@ class LOBModel():
         y = data["target"].to_numpy()
 
         # Incorporate bias term into prediction through linear model
+        # Note that an OLS regression model is not applied, because in this case
+        # the error function is RMSPE rather than RMSE. 
         self.params = minimize(
             fun = rmspe_loss, 
             # Initial guess is no bias, i.e. b0 = 0!

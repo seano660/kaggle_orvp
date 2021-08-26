@@ -35,7 +35,7 @@ def eval_performance(stock_ids: Optional[List[int]] = None, n_trials: int = 1, m
             preds.append(
                 model.fit_predict(
                     stock_id = stock_id, 
-                    target_data = targets,
+                    target_data = targets[targets.index.get_level_values(0) == stock_id],
                     n_trials = n_trials, 
                     mode = mode
                 )

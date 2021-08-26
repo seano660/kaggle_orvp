@@ -34,18 +34,19 @@ def process_book_data(book_data: pd.DataFrame) -> pd.DataFrame:
     # Account for filler data not starting at 0s
     data.set_index(["time_id"], drop = True, inplace = True)
     data["seconds_in_bucket"] = data["seconds_in_bucket"].sub(data.groupby(level = 0)["seconds_in_bucket"].min(), level = 0)
-    data.reset_index(inplace = True)
 
     # Forward fill missing book snapshots
     # The performance here could possibly be improved but works for now
-    data.set_index(["time_id", "seconds_in_bucket"], drop = True, inplace = True)
-    data = data.reindex(
-        labels = pd.MultiIndex.from_product(
-            [data.index.get_level_values(0).unique(), range(0, 600)],
-            names = ["time_id", "seconds_in_bucket"]), 
-        # The only situation this fill logic will fail is if there is a time_id with some N/A values
-        # at the first entry; these rows will be forward filled from the previous timestamp!
-        method = "ffill"
+    data = (
+        data.set_index("seconds_in_bucket", append = True)
+        .reindex(
+            labels = pd.MultiIndex.from_product(
+                [data.index.get_level_values(0).unique(), range(0, 600)],
+                names = ["time_id", "seconds_in_bucket"]), 
+            # The only situation this fill logic will fail is if there is a time_id with some N/A values
+            # at the first entry; these rows will be forward filled from the previous timestamp!
+            method = "ffill"
+        )
     )
 
     data.index = data.index.set_levels(
@@ -133,17 +134,25 @@ def process_order_data(order_data: List[pd.DataFrame], order_type: str) -> pd.Da
     processed_data = []
 
     for level in order_data:
-        _level = level.rename(columns = lambda c: re.search("_([a-z]{1,})[0-9]$", c).group(1))
-        _level.set_index("price", append = True, inplace = True)
-        _level = _level.reorder_levels(["time_id", "price", "seconds_in_bucket"])
+        _level = (
+            level.rename(columns = lambda c: re.search("_([a-z]{1,})[0-9]$", c).group(1))
+            .set_index("price", append = True, inplace = True)
+            .reorder_levels(["time_id", "price", "seconds_in_bucket"])
+        )
         processed_data.append(_level)
 
     events = pd.concat(processed_data)
 
-    events = events.unstack([0, 1])
-    events = events.sub(events.shift(1, freq = "s"), fill_value = 0)
-    events = events.T.stack().to_frame()
-    events.reset_index(level = 0, drop = True, inplace = True)
+    events = (
+        events.unstack([0, 1])
+        .sub(events.shift(1, freq = "s"), fill_value = 0)
+        # Transposing and then stacking is significantly faster than a pure stack!
+        .T
+        .stack()
+        .to_frame()
+        .reset_index(level = 0, drop = True)
+    )
+
     events.columns = ["size"]
 
     events = events[
@@ -213,13 +222,14 @@ def construct_event_history(book_data: pd.DataFrame, trade_events: pd.DataFrame)
     """
 
 
-    book_events = compile_event_data(book_data)
-    
-    book_events = book_events.merge(
-        right = book_data[["bid_price2", "ask_price2"]], 
-        right_index = True, 
-        left_on = ["time_id", "seconds_in_bucket"],
-        how = "left"
+    book_events = (
+        compile_event_data(book_data)
+        .merge(
+            right = book_data[["bid_price2", "ask_price2"]], 
+            right_index = True, 
+            left_on = ["time_id", "seconds_in_bucket"],
+            how = "left"
+        )
     )
 
     # Join events to 1-second lag of book data
@@ -227,15 +237,16 @@ def construct_event_history(book_data: pd.DataFrame, trade_events: pd.DataFrame)
     lag_1["seconds_in_bucket"] = lag_1["seconds_in_bucket"] + pd.Timedelta(1, unit = "s")
     lag_1.set_index(["time_id", "seconds_in_bucket"], inplace = True, drop = True)
 
-    book_events = book_events.merge(
-        right = lag_1[["bid_price1", "ask_price1", "bid_price2", "ask_price2"]], 
-        right_index = True, 
-        left_on = ["time_id", "seconds_in_bucket"], 
-        how = "left", 
-        suffixes = ["_0", "_-1"]
+    book_events = (
+        book_events.merge(
+            right = lag_1[["bid_price1", "ask_price1", "bid_price2", "ask_price2"]], 
+            right_index = True, 
+            left_on = ["time_id", "seconds_in_bucket"], 
+            how = "left", 
+            suffixes = ["_0", "_-1"]
+        )
+        .rename(columns = {"bid_price1": "bid_price1_-1", "ask_price1": "ask_price1_-1"})
     )
-    
-    book_events.rename(columns = {"bid_price1": "bid_price1_-1", "ask_price1": "ask_price1_-1"}, inplace = True)
 
     ### 
     # Match events to each order
@@ -302,10 +313,12 @@ def construct_event_history(book_data: pd.DataFrame, trade_events: pd.DataFrame)
     ]
 
     # Remove any row that didn't qualify as an event
-    book_events = book_events.dropna(subset = ["event_type"])[["event_type", "size"]]
-    book_events.reset_index(level = 3, drop = True, inplace = True)
-    book_events.set_index("event_type", append = True, inplace = True)
-    book_events = book_events.reorder_levels(["time_id", "seconds_in_bucket", "event_type", "price"])
+    book_events = (
+        book_events.dropna(subset = ["event_type"])[["event_type", "size"]]
+        .reset_index(level = 3, drop = True)
+        .set_index("event_type", append = True, inplace = True)
+        .reorder_levels(["time_id", "seconds_in_bucket", "event_type", "price"])
+    )
 
     events = pd.concat([book_events, trade_events], axis = 0)
     events.sort_index(inplace = True)

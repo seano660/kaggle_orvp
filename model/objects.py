@@ -3,6 +3,28 @@
 import simpy
 import random
 from typing import Union, Optional
+from queue import PriorityQueue
+from collections.abc import Generator
+from itertools import count
+
+class SimEnvironment():
+    def __init__(self, init_time: Union[int, float] = 0):
+        """An extremely lightweight class for the simulation. Draws from elements of SimPy"""
+        self._schedule = PriorityQueue()
+        self.time = init_time
+        self._eid = count()
+
+    def schedule(self, event: Generator, delay: Optional[Union[int, float]] = 0):
+        self._schedule.put_nowait(((self.time + delay, next(self._eid)), event))
+
+    def execute(self, until: Union[int, float]):
+        while not self._schedule.empty():
+            t, event = self._schedule.get_nowait()
+            self.time = t[0]
+            if self.time < until:
+                val = event.send(None)
+                self.schedule(event, val)
+
 
 class LimitOrderBook():
     def __init__(
@@ -77,7 +99,7 @@ class LimitOrderBook():
             self.bid_size = self.bid_size + size
         else:
             size = size + self.bid_size
-            self.shift_order_book(shift_dir = -1)
+            self._shift_order_book(shift_dir = -1)
             
             if size != 0:
                 self.modify_bid_queue(size)
@@ -106,7 +128,7 @@ class LimitOrderBook():
             # These orders increase the size of the bid queue 
             self.modify_bid_queue(event_size)
         else:
-            raise ValueError("Event {} is not recognized as a proper event type.".format(event_type))
+            raise ValueError("Event '{}' is not a recognized event type.".format(event_type))
 
         # This event history is nice to have but not really needed - disabled to improve runtime
         # self.update_event_history(event_type, event_size)
@@ -116,7 +138,7 @@ class LimitOrderBook():
 
         self.history.append(
             {
-                "time": self.env.now,
+                "time": self.env.time,
                 "bid_price": self.bid_price,
                 "ask_price": self.ask_price,
                 "bid_size": self.bid_size,
@@ -128,13 +150,13 @@ class LimitOrderBook():
 
         self.event_history.append(
             {
-                "time": self.env.now,
+                "time": self.env.time,
                 "event_type": event_type,
                 "event_size": event_size
             }
         )
 
-    def monitor_history(self):
+    def monitor_history(self, timeout: Union[int, float] = 1):
         """ Generator process to update the price history every second
         
         Note: as opposed to updating the history after every event/change to the order book,
@@ -143,7 +165,7 @@ class LimitOrderBook():
 
         while True:
             self.update_history()
-            yield self.env.timeout(1)
+            yield timeout
 
 
 class EventGenerator():
@@ -174,7 +196,7 @@ class EventGenerator():
         rnd = random.Random(self.random_seed)
 
         while True:
-            yield self.env.timeout(delay = rnd.expovariate(1 / self.params["interarrival"]))
+            yield rnd.expovariate(1 / self.params["interarrival"])
             self.lob.process_event(event_type = self.event_type, event_size = self.params["size"])
 
 
