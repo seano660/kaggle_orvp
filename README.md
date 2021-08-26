@@ -6,6 +6,8 @@ A simulation-based approach to predicting stock volatility by modeling price mov
 
 <b>** Note:</b> Training and running the model requires data from Kaggle's Optiver Realized Volatility Prediction competition. The data can be downloaded [here](https://www.kaggle.com/c/optiver-realized-volatility-prediction/data). 
 
+Tags: Simulation, Optimization, Data Engineering, Model Design
+
 ### Table of Contents
 I. [Background](#sec_1)
 
@@ -90,9 +92,9 @@ This fundamental design choice is driven by three observations:
 2. <b>Realized volatility is a first-order effect of price.</b> In other words, volatility is directly determined by observed prices. Since this is the case, if it is possible to reconstruct price from the given data, it makes little sense to model volatility as some function of other predictors.
 3. <b>Realized volatility is by definition nonlinear.</b> In the case of a pure volatility model, this would require some embedding of the functional form into the model itself. Modeling price requires no such adjustment. 
 
-It should be noted that this is somewhat of a unique approach in the competition field: most public solutions attempt to predict volatility directly from the given data and rely largely on blackbox methods such as neural networks and LightGBM.
+It should be noted that this is somewhat of a unique approach in the competition field: most public solutions attempt to predict volatility <i>directly</i> from the given data and rely largely on blackbox methods such as neural networks and LightGBM.
 
-A survey of contemporary  methods in <i>Statistical Modeling of High Frequency Financial Data</i> (Cont 2011) shows that a popular approach is to modeling prices is to treat the underlying order book as a system of queues, with one queue to represent bid orders and another to represent ask orders (19). By modeling the six event types that act upon the order book -- market buy/sell, limit buy/sell, and cancel buy/sell -- it is possible to produce a model that captures short-term price dynamics. 
+A survey of contemporary  methods in <i>Statistical Modeling of High Frequency Financial Data</i> (Cont 2011) shows that a popular approach to modeling prices is to treat the underlying order book as a system of queues, with one queue to represent bid orders and another to represent ask orders (19). By modeling the six event types that act upon the order book -- market buy/sell, limit buy/sell, and cancel buy/sell -- it is possible to produce a model that captures short-term price dynamics. 
 
 The approach in this project is based on the limit order book modeling described in Cont 2011, among others. The overarching idea is to model the six event types from historical data, and then use them to simulate the limit order book in Monte Carlo fashion -- generating hundreds of possible outcomes and then aggregating them to produce a central/most likely prediction.
 
@@ -106,9 +108,11 @@ The approach in this project is based on the limit order book modeling described
 
 3. <b>A constant order size for each event type.</b> It should be noted that order size generally fluctuates quite substantially and is often dependent on the shares available at a particular price level.
 
-4. <b>A constant bid-ask spread.</b> 
+4. <b>A constant shift in the order book when a price level is exhausted.</b> This means that when all shares at the most competitive bid (ask) level are depleted, the <i>entire</i> order book will shift in the downward (upward) direction. This is done in the interest of maintaining a constant bid-ask spread, and also captures the strong empirical correlation between bid and ask prices. 
 
-4. <b>A separate model for each stock.</b> It is reasoned that the Given that there are roughly 3,830 training samples for each individual stock. 
+4. <b>A separate model for each stock.</b> It is hypothesized that the stocks in the training sample differ materially in terms of their average trading volume and general price behavior. A global model trained on all stocks would likely fail to capture these differences. Since roughly 3,830 training instances exist for each individual stock, it is reasoned that there is enough data to model each stock individually, which should more effectively capture individual stock dynamics. 
+
+5. <b>A global-local model.</b> It is assumed that there is substantial variance of event parameters (i.e. frequency, size) over each time_id snapshot, even if restricting the model to a single stock. For this reason, model parameters are calculated as a mixture of the local (i.e. time_id-specific) and global, macro-aggregated values. The mixture coefficient $\alpha$ is determined through Bayesian optimization.
 
 <a id = "sec_3"></a>
 ## III. Data Engineering
@@ -124,12 +128,12 @@ The raw trade data is already well suited for this task, given that each row cor
 Before any intensive data manipulation can be done, the raw input data must be cleaned. There are several steps that take place in this respect, but the most critical is the reindexing of the book data. As mentioned briefly in Section I, the raw book data only contains entries where there is change to at least one of the price levels. Of course, the timing of these changes will certainly differ for each 10-minute window of data, and therefore in the interest of ensuring a stable and performant algorithm it is necessary to reindex the data.
 
 ```python 
-    data = data.reindex(
-        labels = pd.MultiIndex.from_product(
-            [data.index.get_level_values(0).unique(), range(0, 600)], 
-            names = ["time_id", "seconds_in_bucket"]), 
-        method = "ffill"
-    )
+data = data.reindex(
+    labels = pd.MultiIndex.from_product(
+        [data.index.get_level_values(0).unique(), range(0, 600)], 
+        names = ["time_id", "seconds_in_bucket"]), 
+    method = "ffill"
+)
 ```
 
 This code snippet is responsible for the reindexing operation, ensuring that every `time_id` has all six hundred possible `seconds_in_bucket` entries. Any missing rows are also forward filled with data from the most recent book update (they would be NA otherwise!) . 
@@ -181,3 +185,24 @@ The event tagging algorithm labels each row of the engineered book and trade dat
 <b>Note:</b> Since only the Level-1 order book is to be modeled, the algorithm generally disregards any event that does not occur at the most competitive price level. This could be relaxed in the future if more order levels are to be modeled. 
     
 The event tagging step is the final process in the data engineering pipeline, and the event data is passed onto the model. 
+
+<a id = "sec_4"></a>
+## IV. Model Construction
+
+The model architecture itself is somewhat complex and employs both conventional and blackbox optimization procedures. 
+
+The first optimization step revolves around determining the optimal mixing parameter $\alpha$ for the global and local model parameters. 
+
+The second optimization step is performed to add a linear bias term to the simulation prediction, which aims to account for factors not incorporated into the simulation model itself. 
+
+
+
+<a id = "sec_5"></a>
+## V. Performance Analysis
+
+The primary limitation of the model as it currently stands is that it is very computationally expensive. Each simulation currently takes around 40 milliseconds to execute (which really doesn't seem like a lot!). However, given that there are more than 400,000 target values in training and upwards of 150,000 in testing, a 40ms prediction time implies total execution time of over 4 hours even if just a <i>single</i> trial is conducted per simulation - and that doesn't even account for the additional time required to re-engineer the data!
+
+As a result of the disappointingly slow execution speed, it has been difficult to evaluate the overall performance of the model. However, smaller scale evaluation has produced some encouraging results. 
+
+<a id = "sec_6"></a>
+## VI. Conclusion
